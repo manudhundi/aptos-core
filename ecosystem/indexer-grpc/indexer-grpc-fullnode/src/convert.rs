@@ -12,7 +12,6 @@ use aptos_api_types::{
 use aptos_bitvec::BitVec;
 use aptos_logger::warn;
 use aptos_protos::{transaction::v1 as transaction, util::timestamp};
-use aptos_types::dkg_transaction::DKGTranscript;
 use hex;
 use move_binary_format::file_format::Ability;
 use std::time::Duration;
@@ -645,7 +644,8 @@ pub fn convert_transaction(
         },
         Transaction::PendingTransaction(_) => panic!("PendingTransaction is not supported"),
         Transaction::DisKeyGenTransaction(_) => {
-            transaction::transaction::TransactionType::DKG
+            // dkg todo: add DisKeyGenTransaction to protobuf properly
+            transaction::transaction::TransactionType::StateCheckpoint
         },
     };
 
@@ -697,11 +697,11 @@ pub fn convert_transaction(
             )
         },
         Transaction::PendingTransaction(_) => panic!("PendingTransaction not supported"),
-        Transaction::DisKeyGenTransaction(dkg) => {
-            transaction::transaction::TxnData::DisKeyGenTransaction(transaction::DKGTransaction {
-                epoch: dkg.epoch.0,
-                dkg_transcript: DKGTranscript { dummy_bytes: dkg.dkg_transcript.dummy_bytes.clone()}
-            })
+        Transaction::DisKeyGenTransaction(_dkg) => {
+            // dkg todo: add dkg transaction type for indexer properly
+            transaction::transaction::TxnData::StateCheckpoint(
+                transaction::StateCheckpointTransaction {},
+            )
         },
     };
 

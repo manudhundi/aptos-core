@@ -847,6 +847,8 @@ impl Transaction {
             GenesisTransaction(_) => (TransactionType::Genesis, None, txn.info, txn.events),
             BlockMetadata(_) => (TransactionType::BlockMetadata, None, txn.info, txn.events),
             StateCheckpoint(_) => (TransactionType::StateCheckpoint, None, txn.info, vec![]),
+            // dkg todo: add dkg transaction type properly
+            DKGTransaction(_) => (TransactionType::StateCheckpoint, None, txn.info, vec![]),
         };
 
         // Operations must be sequential and operation index must always be in the same order

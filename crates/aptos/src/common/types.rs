@@ -1234,6 +1234,19 @@ impl From<&Transaction> for TransactionSummary {
                 pending: None,
                 sequence_number: None,
             },
+            // dkg todo: add dkg transaction handling properly
+            Transaction::DisKeyGenTransaction(txn) => TransactionSummary {
+                transaction_hash: txn.info.hash,
+                success: Some(txn.info.success),
+                version: Some(txn.info.version.0),
+                vm_status: Some(txn.info.vm_status.clone()),
+                timestamp_us: Some(txn.timestamp.0),
+                sender: None,
+                gas_used: None,
+                gas_unit_price: None,
+                pending: None,
+                sequence_number: None,
+            },
         }
     }
 }
