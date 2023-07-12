@@ -6,6 +6,8 @@ pub mod value_exchange;
 pub mod values_impl;
 
 #[cfg(test)]
+mod value_exchange_test;
+#[cfg(test)]
 mod value_tests;
 
 #[cfg(all(test, feature = "fuzzing"))]
