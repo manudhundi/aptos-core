@@ -2931,7 +2931,7 @@ pub mod debug {
  *   is to involve an explicit representation of the type layout.
  *
  **************************************************************************************/
-use crate::values::{ValueExchange, ValueID};
+use crate::values::ValueExchange;
 use serde::{
     de,
     de::Error as DeError,
@@ -2961,6 +2961,7 @@ impl Value {
         .ok()
     }
 
+    // TODO: Placeholder name :)
     pub fn complicated_deserialize(
         blob: &[u8],
         layout: &MoveTypeLayout,
@@ -2976,6 +2977,7 @@ impl Value {
         .ok()
     }
 
+    // TODO: Placeholder name :)
     pub fn complicated_serialize(
         &self,
         layout: &MoveTypeLayout,
@@ -3101,27 +3103,27 @@ impl<'a, 'b, 'c> serde::Serialize for AnnotatedValue<'a, 'b, 'c, MoveTypeLayout,
                 .serialize(serializer)
             },
 
-            (MoveTypeLayout::Marked(layout), val) => {
+            (MoveTypeLayout::Marked(layout), val_impl) => {
                 match self.exchange {
                     Some(exchange) => {
                         // TODO: We can never have refs, so everything is copy by value. Is it ok?
                         // TODO: Maybe serialization should consume the value?
-                        let id = exchange
-                            .record_value(Value(val.copy_value().map_err(ser::Error::custom)?))
+                        let value = exchange
+                            .claim_value(Value(val_impl.copy_value().map_err(ser::Error::custom)?))
                             .map_err(ser::Error::custom)?;
                         AnnotatedValue {
                             exchange: self.exchange,
                             layout: layout.as_ref(),
-                            val: &id.0 .0,
+                            val: &value.0,
                         }
                         .serialize(serializer)
                     },
                     None => {
-                        // We do not exchange values, continue with serialization.
+                        // We did not exchange values, so simply continue with serialization.
                         AnnotatedValue {
                             exchange: self.exchange,
                             layout: layout.as_ref(),
-                            val,
+                            val: val_impl,
                         }
                         .serialize(serializer)
                     },
@@ -3221,9 +3223,7 @@ impl<'d, 'a> serde::de::DeserializeSeed<'d> for SeedWrapper<'a, &MoveTypeLayout>
 
                 // Then check if value needs to be exchanged.
                 match self.exchange {
-                    Some(exchange) => exchange
-                        .claim_value(ValueID(value))
-                        .map_err(de::Error::custom),
+                    Some(exchange) => exchange.record_value(value).map_err(de::Error::custom),
                     None => Ok(value),
                 }
             },
