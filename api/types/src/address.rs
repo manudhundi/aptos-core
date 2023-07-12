@@ -22,7 +22,7 @@ impl Address {
     /// standard. The standard is defined as part of AIP-40, read more here:
     /// https://github.com/aptos-foundation/AIPs/blob/main/aips/aip-40.md
     ///
-    /// In short, all special addresses MUST be represented in SHORT form, e.g.
+    /// In short, all special addresses SHOULD be represented in SHORT form, e.g.
     ///
     /// 0x1
     ///
