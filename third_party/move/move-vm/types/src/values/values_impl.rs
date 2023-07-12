@@ -2931,6 +2931,7 @@ pub mod debug {
  *   is to involve an explicit representation of the type layout.
  *
  **************************************************************************************/
+use crate::values::ValueExchange;
 use serde::{
     de::Error as DeError,
     ser::{Error as SerError, SerializeSeq, SerializeTuple},
@@ -2939,11 +2940,19 @@ use serde::{
 
 impl Value {
     pub fn simple_deserialize(blob: &[u8], layout: &MoveTypeLayout) -> Option<Value> {
-        bcs::from_bytes_seed(SeedWrapper { layout }, blob).ok()
+        bcs::from_bytes_seed(
+            SeedWrapper {
+                exchange: None,
+                layout,
+            },
+            blob,
+        )
+        .ok()
     }
 
     pub fn simple_serialize(&self, layout: &MoveTypeLayout) -> Option<Vec<u8>> {
         bcs::to_bytes(&AnnotatedValue {
+            exchange: None,
             layout,
             val: &self.0,
         })
@@ -2953,11 +2962,19 @@ impl Value {
 
 impl Struct {
     pub fn simple_deserialize(blob: &[u8], layout: &MoveStructLayout) -> Option<Struct> {
-        bcs::from_bytes_seed(SeedWrapper { layout }, blob).ok()
+        bcs::from_bytes_seed(
+            SeedWrapper {
+                exchange: None,
+                layout,
+            },
+            blob,
+        )
+        .ok()
     }
 
     pub fn simple_serialize(&self, layout: &MoveStructLayout) -> Option<Vec<u8>> {
         bcs::to_bytes(&AnnotatedValue {
+            exchange: None,
             layout,
             val: &self.fields,
         })
@@ -2965,9 +2982,10 @@ impl Struct {
     }
 }
 
-struct AnnotatedValue<'a, 'b, T1, T2> {
-    layout: &'a T1,
-    val: &'b T2,
+struct AnnotatedValue<'a, 'b, 'c, T1, T2> {
+    exchange: Option<&'a dyn ValueExchange>,
+    layout: &'b T1,
+    val: &'c T2,
 }
 
 fn invariant_violation<S: serde::Serializer>(message: String) -> S::Error {
@@ -2976,7 +2994,7 @@ fn invariant_violation<S: serde::Serializer>(message: String) -> S::Error {
     )
 }
 
-impl<'a, 'b> serde::Serialize for AnnotatedValue<'a, 'b, MoveTypeLayout, ValueImpl> {
+impl<'a, 'b, 'c> serde::Serialize for AnnotatedValue<'a, 'b, 'c, MoveTypeLayout, ValueImpl> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match (self.layout, self.val) {
             (MoveTypeLayout::U8, ValueImpl::U8(x)) => serializer.serialize_u8(*x),
@@ -2990,6 +3008,7 @@ impl<'a, 'b> serde::Serialize for AnnotatedValue<'a, 'b, MoveTypeLayout, ValueIm
 
             (MoveTypeLayout::Struct(struct_layout), ValueImpl::Container(Container::Struct(r))) => {
                 (AnnotatedValue {
+                    exchange: self.exchange,
                     layout: struct_layout,
                     val: &*r.borrow(),
                 })
@@ -3020,7 +3039,11 @@ impl<'a, 'b> serde::Serialize for AnnotatedValue<'a, 'b, MoveTypeLayout, ValueIm
                         let v = r.borrow();
                         let mut t = serializer.serialize_seq(Some(v.len()))?;
                         for val in v.iter() {
-                            t.serialize_element(&AnnotatedValue { layout, val })?;
+                            t.serialize_element(&AnnotatedValue {
+                                exchange: self.exchange,
+                                layout,
+                                val,
+                            })?;
                         }
                         t.end()
                     },
@@ -3041,6 +3064,7 @@ impl<'a, 'b> serde::Serialize for AnnotatedValue<'a, 'b, MoveTypeLayout, ValueIm
                     )));
                 }
                 (AnnotatedValue {
+                    exchange: self.exchange,
                     layout: &MoveTypeLayout::Address,
                     val: &v[0],
                 })
@@ -3048,6 +3072,7 @@ impl<'a, 'b> serde::Serialize for AnnotatedValue<'a, 'b, MoveTypeLayout, ValueIm
             },
 
             (MoveTypeLayout::Marked(layout), val) => AnnotatedValue {
+                exchange: self.exchange,
                 layout: layout.as_ref(),
                 val,
             }
@@ -3061,7 +3086,7 @@ impl<'a, 'b> serde::Serialize for AnnotatedValue<'a, 'b, MoveTypeLayout, ValueIm
     }
 }
 
-impl<'a, 'b> serde::Serialize for AnnotatedValue<'a, 'b, MoveStructLayout, Vec<ValueImpl>> {
+impl<'a, 'b, 'c> serde::Serialize for AnnotatedValue<'a, 'b, 'c, MoveStructLayout, Vec<ValueImpl>> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let values = &self.val;
         let fields = self.layout.fields();
@@ -3074,6 +3099,7 @@ impl<'a, 'b> serde::Serialize for AnnotatedValue<'a, 'b, MoveStructLayout, Vec<V
         let mut t = serializer.serialize_tuple(values.len())?;
         for (field_layout, val) in fields.iter().zip(values.iter()) {
             t.serialize_element(&AnnotatedValue {
+                exchange: self.exchange,
                 layout: field_layout,
                 val,
             })?;
@@ -3083,11 +3109,12 @@ impl<'a, 'b> serde::Serialize for AnnotatedValue<'a, 'b, MoveStructLayout, Vec<V
 }
 
 #[derive(Clone)]
-struct SeedWrapper<L> {
+struct SeedWrapper<'a, L> {
+    exchange: Option<&'a dyn ValueExchange>,
     layout: L,
 }
 
-impl<'d> serde::de::DeserializeSeed<'d> for SeedWrapper<&MoveTypeLayout> {
+impl<'d, 'a> serde::de::DeserializeSeed<'d> for SeedWrapper<'a, &MoveTypeLayout> {
     type Value = Value;
 
     fn deserialize<D: serde::de::Deserializer<'d>>(
@@ -3109,6 +3136,7 @@ impl<'d> serde::de::DeserializeSeed<'d> for SeedWrapper<&MoveTypeLayout> {
 
             L::Struct(struct_layout) => Ok(Value::struct_(
                 SeedWrapper {
+                    exchange: self.exchange,
                     layout: struct_layout,
                 }
                 .deserialize(deserializer)?,
@@ -3124,14 +3152,17 @@ impl<'d> serde::de::DeserializeSeed<'d> for SeedWrapper<&MoveTypeLayout> {
                 L::Bool => Value::vector_bool(Vec::deserialize(deserializer)?),
                 L::Address => Value::vector_address(Vec::deserialize(deserializer)?),
                 layout => {
-                    let v = deserializer
-                        .deserialize_seq(VectorElementVisitor(SeedWrapper { layout }))?;
+                    let v = deserializer.deserialize_seq(VectorElementVisitor(SeedWrapper {
+                        exchange: self.exchange,
+                        layout,
+                    }))?;
                     let container = Container::Vec(Rc::new(RefCell::new(v)));
                     Value(ValueImpl::Container(container))
                 },
             }),
 
             L::Marked(layout) => SeedWrapper {
+                exchange: self.exchange,
                 layout: layout.as_ref(),
             }
             .deserialize(deserializer),
@@ -3139,7 +3170,7 @@ impl<'d> serde::de::DeserializeSeed<'d> for SeedWrapper<&MoveTypeLayout> {
     }
 }
 
-impl<'d> serde::de::DeserializeSeed<'d> for SeedWrapper<&MoveStructLayout> {
+impl<'d> serde::de::DeserializeSeed<'d> for SeedWrapper<'_, &MoveStructLayout> {
     type Value = Struct;
 
     fn deserialize<D: serde::de::Deserializer<'d>>(
@@ -3147,15 +3178,17 @@ impl<'d> serde::de::DeserializeSeed<'d> for SeedWrapper<&MoveStructLayout> {
         deserializer: D,
     ) -> Result<Self::Value, D::Error> {
         let field_layouts = self.layout.fields();
-        let fields = deserializer
-            .deserialize_tuple(field_layouts.len(), StructFieldVisitor(field_layouts))?;
+        let fields = deserializer.deserialize_tuple(
+            field_layouts.len(),
+            StructFieldVisitor(self.exchange, field_layouts),
+        )?;
         Ok(Struct::pack(fields))
     }
 }
 
-struct VectorElementVisitor<'a>(SeedWrapper<&'a MoveTypeLayout>);
+struct VectorElementVisitor<'a, 'b>(SeedWrapper<'a, &'b MoveTypeLayout>);
 
-impl<'d, 'a> serde::de::Visitor<'d> for VectorElementVisitor<'a> {
+impl<'d, 'a, 'b> serde::de::Visitor<'d> for VectorElementVisitor<'a, 'b> {
     type Value = Vec<ValueImpl>;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -3174,9 +3207,9 @@ impl<'d, 'a> serde::de::Visitor<'d> for VectorElementVisitor<'a> {
     }
 }
 
-struct StructFieldVisitor<'a>(&'a [MoveTypeLayout]);
+struct StructFieldVisitor<'a, 'b>(Option<&'a dyn ValueExchange>, &'b [MoveTypeLayout]);
 
-impl<'d, 'a> serde::de::Visitor<'d> for StructFieldVisitor<'a> {
+impl<'d, 'a, 'b> serde::de::Visitor<'d> for StructFieldVisitor<'a, 'b> {
     type Value = Vec<Value>;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -3188,8 +3221,9 @@ impl<'d, 'a> serde::de::Visitor<'d> for StructFieldVisitor<'a> {
         A: serde::de::SeqAccess<'d>,
     {
         let mut val = Vec::new();
-        for (i, field_layout) in self.0.iter().enumerate() {
+        for (i, field_layout) in self.1.iter().enumerate() {
             if let Some(elem) = seq.next_element_seed(SeedWrapper {
+                exchange: self.0,
                 layout: field_layout,
             })? {
                 val.push(elem)
