@@ -282,6 +282,9 @@ fn native_format_impl(
             )?;
             out.push('}');
         },
+        MoveTypeLayout::Marked(ty) => {
+            native_format_impl(context, ty, val, depth, out)?;
+        },
     };
     if context.include_int_type {
         write!(out, "{}", suffix).unwrap();

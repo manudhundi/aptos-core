@@ -3047,6 +3047,12 @@ impl<'a, 'b> serde::Serialize for AnnotatedValue<'a, 'b, MoveTypeLayout, ValueIm
                 .serialize(serializer)
             },
 
+            (MoveTypeLayout::Marked(layout), val) => AnnotatedValue {
+                layout: layout.as_ref(),
+                val,
+            }
+            .serialize(serializer),
+
             (ty, val) => Err(invariant_violation::<S>(format!(
                 "cannot serialize value {:?} as {:?}",
                 val, ty
@@ -3108,40 +3114,27 @@ impl<'d> serde::de::DeserializeSeed<'d> for SeedWrapper<&MoveTypeLayout> {
                 .deserialize(deserializer)?,
             )),
 
-            L::Vector(layout) => {
-                let container = match &**layout {
-                    L::U8 => {
-                        Container::VecU8(Rc::new(RefCell::new(Vec::deserialize(deserializer)?)))
-                    },
-                    L::U16 => {
-                        Container::VecU16(Rc::new(RefCell::new(Vec::deserialize(deserializer)?)))
-                    },
-                    L::U32 => {
-                        Container::VecU32(Rc::new(RefCell::new(Vec::deserialize(deserializer)?)))
-                    },
-                    L::U64 => {
-                        Container::VecU64(Rc::new(RefCell::new(Vec::deserialize(deserializer)?)))
-                    },
-                    L::U128 => {
-                        Container::VecU128(Rc::new(RefCell::new(Vec::deserialize(deserializer)?)))
-                    },
-                    L::U256 => {
-                        Container::VecU256(Rc::new(RefCell::new(Vec::deserialize(deserializer)?)))
-                    },
-                    L::Bool => {
-                        Container::VecBool(Rc::new(RefCell::new(Vec::deserialize(deserializer)?)))
-                    },
-                    L::Address => Container::VecAddress(Rc::new(RefCell::new(Vec::deserialize(
-                        deserializer,
-                    )?))),
-                    layout => {
-                        let v = deserializer
-                            .deserialize_seq(VectorElementVisitor(SeedWrapper { layout }))?;
-                        Container::Vec(Rc::new(RefCell::new(v)))
-                    },
-                };
-                Ok(Value(ValueImpl::Container(container)))
-            },
+            L::Vector(layout) => Ok(match &**layout {
+                L::U8 => Value::vector_u8(Vec::deserialize(deserializer)?),
+                L::U16 => Value::vector_u16(Vec::deserialize(deserializer)?),
+                L::U32 => Value::vector_u32(Vec::deserialize(deserializer)?),
+                L::U64 => Value::vector_u64(Vec::deserialize(deserializer)?),
+                L::U128 => Value::vector_u128(Vec::deserialize(deserializer)?),
+                L::U256 => Value::vector_u256(Vec::deserialize(deserializer)?),
+                L::Bool => Value::vector_bool(Vec::deserialize(deserializer)?),
+                L::Address => Value::vector_address(Vec::deserialize(deserializer)?),
+                layout => {
+                    let v = deserializer
+                        .deserialize_seq(VectorElementVisitor(SeedWrapper { layout }))?;
+                    let container = Container::Vec(Rc::new(RefCell::new(v)));
+                    Value(ValueImpl::Container(container))
+                },
+            }),
+
+            L::Marked(layout) => SeedWrapper {
+                layout: layout.as_ref(),
+            }
+            .deserialize(deserializer),
         }
     }
 }
@@ -3613,6 +3606,8 @@ pub mod prop {
                 .collect::<Vec<_>>()
                 .prop_map(move |vals| Value::struct_(Struct::pack(vals)))
                 .boxed(),
+
+            L::Marked(layout) => value_strategy_with_layout(layout.as_ref()),
         }
     }
 
@@ -3634,6 +3629,7 @@ pub mod prop {
         leaf.prop_recursive(8, 32, 2, |inner| {
             prop_oneof![
                 1 => inner.clone().prop_map(|layout| L::Vector(Box::new(layout))),
+                1 => inner.clone().prop_map(|layout| L::Marked(Box::new(layout))),
                 1 => vec(inner, 0..1).prop_map(|f_layouts| {
                      L::Struct(MoveStructLayout::new(f_layouts))}),
             ]
@@ -3648,15 +3644,16 @@ pub mod prop {
     }
 }
 
-use crate::values::patched::{
-    identifiers::{GenID, ID},
-    serialization_type_layout::SerializationTypeLayout,
-};
 use move_core_types::value::{MoveStruct, MoveValue};
 
 impl ValueImpl {
     pub fn as_move_value(&self, layout: &MoveTypeLayout) -> MoveValue {
         use MoveTypeLayout as L;
+
+        // Make sure to strip all marks from the type layout.
+        if let L::Marked(layout) = layout {
+            return self.as_move_value(layout.as_ref());
+        }
 
         match (layout, &self) {
             (L::U8, ValueImpl::U8(x)) => MoveValue::U8(*x),
@@ -3717,357 +3714,5 @@ impl ValueImpl {
 impl Value {
     pub fn as_move_value(&self, layout: &MoveTypeLayout) -> MoveValue {
         self.0.as_move_value(layout)
-    }
-}
-
-/***************************************************************************************
- *
- * Patched Values
- *
- *   Implements serialization and deserialization of patched values. Note that the
- *   logic is placed in this file to avoid making ValueImpl and friends `pub(crate)`.
- *
- **************************************************************************************/
-
-// TODO: Can we combine seeds and annotated values for old (de-)serialization?
-
-/// Struct used to control patched value deserialization. It stores the type layout,
-/// as well as an optional trait object to replace marked values with identifiers.
-#[derive(Clone, Copy)]
-struct DeserializeSeed<'g, 'l> {
-    generator: Option<&'g dyn GenID>,
-    layout: &'l SerializationTypeLayout,
-}
-
-// Implements deserialization into `Value` types with optional replacements of marked
-// values into unique identifiers.
-impl<'d> serde::de::DeserializeSeed<'d> for DeserializeSeed<'_, '_> {
-    type Value = Value;
-
-    fn deserialize<D: serde::de::Deserializer<'d>>(
-        self,
-        deserializer: D,
-    ) -> Result<Self::Value, D::Error> {
-        use SerializationTypeLayout as L;
-
-        match self.layout {
-            L::Bool => bool::deserialize(deserializer).map(Value::bool),
-            L::U8 => u8::deserialize(deserializer).map(Value::u8),
-            L::U16 => u16::deserialize(deserializer).map(Value::u16),
-            L::U32 => u32::deserialize(deserializer).map(Value::u32),
-            L::U64 => u64::deserialize(deserializer).map(Value::u64),
-            L::U128 => u128::deserialize(deserializer).map(Value::u128),
-            L::U256 => u256::U256::deserialize(deserializer).map(Value::u256),
-            L::Address => AccountAddress::deserialize(deserializer).map(Value::address),
-            L::Signer => AccountAddress::deserialize(deserializer).map(Value::signer),
-            L::Vector(layout) => match &**layout {
-                L::Bool => Vec::deserialize(deserializer).map(Value::vector_bool),
-                L::U8 => Vec::deserialize(deserializer).map(Value::vector_u8),
-                L::U16 => Vec::deserialize(deserializer).map(Value::vector_u16),
-                L::U32 => Vec::deserialize(deserializer).map(Value::vector_u32),
-                L::U64 => Vec::deserialize(deserializer).map(Value::vector_u64),
-                L::U128 => Vec::deserialize(deserializer).map(Value::vector_u128),
-                L::U256 => Vec::deserialize(deserializer).map(Value::vector_u256),
-                L::Address => Vec::deserialize(deserializer).map(Value::vector_address),
-                layout => {
-                    let seed = DeserializeSeed {
-                        generator: self.generator,
-                        layout,
-                    };
-                    deserializer
-                        .deserialize_seq(PatchedVectorElementVisitor(seed))
-                        .map(|v| {
-                            Value(ValueImpl::Container(Container::Vec(Rc::new(RefCell::new(
-                                v,
-                            )))))
-                        })
-                },
-            },
-            L::Struct(field_layouts) => deserializer
-                .deserialize_tuple(
-                    field_layouts.len(),
-                    PatchedStructFieldVisitor(self.generator, field_layouts),
-                )
-                .map(|fields| Value::struct_(Struct::pack(fields))),
-            // Marker type requires special handling.
-            // TODO: Remove duplication.
-            L::U64Marker => {
-                if let Some(generator) = self.generator {
-                    // If ID generator is used during deserialization, all marked values have to be
-                    // replaced by unique identifiers.
-                    let value = u64::deserialize(deserializer)?;
-                    let id = generator
-                        .generate_id_and_record_value(IntegerValue::U64(value))
-                        .map_err(D::Error::custom)?;
-                    Ok(Value::u64(id.0))
-                } else {
-                    // Otherwise, marked value is treated as a regular integer value.
-                    u64::deserialize(deserializer).map(Value::u64)
-                }
-            },
-            L::U128Marker => {
-                if let Some(generator) = self.generator {
-                    // If ID generator is used during deserialization, all marked values have to be
-                    // replaced by unique identifiers.
-                    let value = u128::deserialize(deserializer)?;
-                    let id = generator
-                        .generate_id_and_record_value(IntegerValue::U128(value))
-                        .map_err(D::Error::custom)?;
-                    Ok(Value::u128(id.0 as u128))
-                } else {
-                    // Otherwise, marked value is treated as a regular integer value.
-                    u128::deserialize(deserializer).map(Value::u128)
-                }
-            },
-        }
-    }
-}
-
-// Visitor to implement vector deserialization using serde.
-struct PatchedVectorElementVisitor<'g, 'l>(DeserializeSeed<'g, 'l>);
-
-impl<'d, 'g, 'l> serde::de::Visitor<'d> for PatchedVectorElementVisitor<'g, 'l> {
-    type Value = Vec<ValueImpl>;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("Vector")
-    }
-
-    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-    where
-        A: serde::de::SeqAccess<'d>,
-    {
-        let mut vals = Vec::new();
-        let seed = DeserializeSeed {
-            generator: self.0.generator,
-            layout: self.0.layout,
-        };
-        while let Some(elem) = seq.next_element_seed(seed)? {
-            vals.push(elem.0)
-        }
-        Ok(vals)
-    }
-}
-
-// Visitor to implement struct deserialization using serde.
-struct PatchedStructFieldVisitor<'g, 'l>(Option<&'g dyn GenID>, &'l [SerializationTypeLayout]);
-
-impl<'d, 'g, 'l> serde::de::Visitor<'d> for PatchedStructFieldVisitor<'g, 'l> {
-    type Value = Vec<Value>;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("Struct")
-    }
-
-    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-    where
-        A: serde::de::SeqAccess<'d>,
-    {
-        let mut val = Vec::new();
-        for (i, field_layout) in self.1.iter().enumerate() {
-            if let Some(elem) = seq.next_element_seed(DeserializeSeed {
-                generator: self.0,
-                layout: field_layout,
-            })? {
-                val.push(elem)
-            } else {
-                return Err(serde::de::Error::invalid_length(i, &self));
-            }
-        }
-        Ok(val)
-    }
-}
-
-impl Value {
-    /// Deserialize bytes into a Move value. Identical to `Value::simple_deserialize`.
-    pub fn deserialize_with_new_layout(
-        bytes: &[u8],
-        layout: &SerializationTypeLayout,
-    ) -> Option<Value> {
-        let seed = DeserializeSeed {
-            generator: None,
-            layout,
-        };
-        bcs::from_bytes_seed(seed, bytes).ok()
-    }
-
-    /// Deserialize bytes into a Move value and replaces all marked values with unique
-    /// identifiers. All identifiers are recorded by `generator` and can be queried at
-    /// serialization time.
-    pub fn deserialize_with_new_layout_and_replace_markers(
-        bytes: &[u8],
-        layout: &SerializationTypeLayout,
-        generator: &dyn GenID,
-    ) -> Option<Value> {
-        let seed = DeserializeSeed {
-            generator: Some(generator),
-            layout,
-        };
-        bcs::from_bytes_seed(seed, bytes).ok()
-    }
-}
-
-/// Struct for type-based serialization. It annotates the value with a type
-/// layout, and also takes an additional trait object to replace marked identifiers
-/// with values.
-struct AnnotatedPatchedValue<'g, 'l, 'v> {
-    generator: Option<&'g dyn GenID>,
-    layout: &'l SerializationTypeLayout,
-    value: &'v ValueImpl,
-}
-
-impl<'g, 'l, 'v> serde::Serialize for AnnotatedPatchedValue<'g, 'l, 'v> {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use SerializationTypeLayout as L;
-        match (self.layout, self.value) {
-            (L::U8, ValueImpl::U8(x)) => serializer.serialize_u8(*x),
-            (L::U16, ValueImpl::U16(x)) => serializer.serialize_u16(*x),
-            (L::U32, ValueImpl::U32(x)) => serializer.serialize_u32(*x),
-            (L::U64, ValueImpl::U64(x)) => serializer.serialize_u64(*x),
-            (L::U128, ValueImpl::U128(x)) => serializer.serialize_u128(*x),
-            (L::U256, ValueImpl::U256(x)) => x.serialize(serializer),
-            (L::Bool, ValueImpl::Bool(x)) => serializer.serialize_bool(*x),
-            (L::Address, ValueImpl::Address(x)) => x.serialize(serializer),
-            (L::Signer, ValueImpl::Container(Container::Struct(r))) => {
-                let v = r.borrow();
-                if v.len() != 1 {
-                    return Err(invariant_violation::<S>(format!(
-                        "cannot serialize container as a signer -- expected 1 field got {}",
-                        v.len()
-                    )));
-                }
-                (AnnotatedPatchedValue {
-                    generator: self.generator,
-                    layout: &L::Address,
-                    value: &v[0],
-                })
-                .serialize(serializer)
-            },
-
-            // TODO: Remove duplication.
-            (L::U64Marker, ValueImpl::U64(x)) => {
-                if let Some(generator) = self.generator {
-                    let id = ID(*x);
-                    let value = generator
-                        .get_value(id)
-                        .map_err(S::Error::custom)?
-                        .cast_u64()
-                        .map_err(S::Error::custom)?;
-                    serializer.serialize_u64(value)
-                } else {
-                    serializer.serialize_u64(*x)
-                }
-            },
-            (L::U128Marker, ValueImpl::U128(x)) => {
-                if let Some(generator) = self.generator {
-                    if *x > (u64::MAX as u128) {
-                        return Err(S::Error::custom(
-                            PartialVMError::new(StatusCode::ARITHMETIC_ERROR).with_message(
-                                format!(
-                                    "Cannot have identifier {} which uses more than 64 bits",
-                                    x
-                                ),
-                            ),
-                        ));
-                    }
-                    let id = ID(*x as u64);
-                    let value = generator
-                        .get_value(id)
-                        .map_err(S::Error::custom)?
-                        .cast_u128()
-                        .map_err(S::Error::custom)?;
-                    serializer.serialize_u128(value)
-                } else {
-                    serializer.serialize_u128(*x)
-                }
-            },
-
-            (L::Struct(field_layouts), ValueImpl::Container(Container::Struct(r))) => {
-                let values = &*r.borrow();
-                if field_layouts.len() != values.len() {
-                    return Err(invariant_violation::<S>(format!(
-                        "cannot serialize struct value {:?} as {:?} -- number of fields mismatch",
-                        self.value, self.layout
-                    )));
-                }
-                let mut t = serializer.serialize_tuple(values.len())?;
-                for (field_layout, value) in field_layouts.iter().zip(values.iter()) {
-                    t.serialize_element(&AnnotatedPatchedValue {
-                        generator: self.generator,
-                        layout: field_layout,
-                        value,
-                    })?;
-                }
-                t.end()
-            },
-
-            (L::Vector(layout), ValueImpl::Container(container)) => {
-                let layout = &**layout;
-                match (layout, container) {
-                    (L::U8, Container::VecU8(r)) => r.borrow().serialize(serializer),
-                    (L::U16, Container::VecU16(r)) => r.borrow().serialize(serializer),
-                    (L::U32, Container::VecU32(r)) => r.borrow().serialize(serializer),
-                    (L::U64, Container::VecU64(r)) => r.borrow().serialize(serializer),
-                    (L::U128, Container::VecU128(r)) => r.borrow().serialize(serializer),
-                    (L::U256, Container::VecU256(r)) => r.borrow().serialize(serializer),
-                    (L::Bool, Container::VecBool(r)) => r.borrow().serialize(serializer),
-                    (L::Address, Container::VecAddress(r)) => r.borrow().serialize(serializer),
-
-                    (_, Container::Vec(r)) => {
-                        let v = r.borrow();
-                        let mut t = serializer.serialize_seq(Some(v.len()))?;
-                        for value in v.iter() {
-                            t.serialize_element(&AnnotatedPatchedValue {
-                                generator: self.generator,
-                                layout,
-                                value,
-                            })?;
-                        }
-                        t.end()
-                    },
-
-                    (layout, container) => Err(invariant_violation::<S>(format!(
-                        "cannot serialize container {:?} as {:?}",
-                        container, layout
-                    ))),
-                }
-            },
-
-            (ty, val) => Err(invariant_violation::<S>(format!(
-                "cannot serialize value {:?} as {:?}",
-                val, ty
-            ))),
-        }
-    }
-}
-
-impl Value {
-    /// Serializes a Move value into bytes. Identical to `Value::simple_serialize`.
-    pub fn serialize_with_new_layout(
-        &self,
-        layout: &SerializationTypeLayout,
-    ) -> Option<Vec<u8>> {
-        let annotated = AnnotatedPatchedValue {
-            generator: None,
-            layout,
-            value: &self.0,
-        };
-        bcs::to_bytes(&annotated).ok()
-    }
-
-    /// Serializes a Move value into bytes, also replacing all marked unique identifiers with
-    /// values. The values are obtained by `generator` and can be queried at
-    /// serialization time.
-    pub fn serialize_with_new_layout_and_replace_markers(
-        &self,
-        layout: &SerializationTypeLayout,
-        generator: &dyn GenID,
-    ) -> Option<Vec<u8>> {
-        let annotated = AnnotatedPatchedValue {
-            generator: Some(generator),
-            layout,
-            value: &self.0,
-        };
-        bcs::to_bytes(&annotated).ok()
     }
 }
