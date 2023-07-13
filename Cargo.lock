@@ -1857,7 +1857,6 @@ dependencies = [
  "hex",
  "once_cell",
  "prost",
- "regex",
  "serde 1.0.149",
  "serde_json",
  "sha2 0.9.9",
