@@ -24,6 +24,7 @@ use move_binary_format::{
 };
 use move_bytecode_verifier::{self, cyclic_dependencies, dependencies};
 use move_core_types::{
+    account_address::AccountAddress,
     identifier::{IdentStr, Identifier},
     language_storage::{ModuleId, StructTag, TypeTag},
     value::{MoveFieldLayout, MoveStructLayout, MoveTypeLayout},
@@ -2826,6 +2827,7 @@ impl Loader {
         gidx: CachedStructIndex,
         ty_args: &[Type],
         count: &mut u64,
+        marked: &mut bool,
         depth: u64,
     ) -> PartialVMResult<MoveStructLayout> {
         if let Some(struct_map) = self.type_cache.read().structs.get(&gidx) {
@@ -2848,7 +2850,7 @@ impl Loader {
             .collect::<PartialVMResult<Vec<_>>>()?;
         let field_layouts = field_tys
             .iter()
-            .map(|ty| self.type_to_type_layout_impl(ty, count, depth + 1))
+            .map(|ty| self.type_to_type_layout_impl(ty, count, marked, depth + 1))
             .collect::<PartialVMResult<Vec<_>>>()?;
         let field_node_count = *count - count_before;
 
@@ -2867,10 +2869,52 @@ impl Loader {
         Ok(struct_layout)
     }
 
+    // TODO: Move to another file and make constants const.
+    fn is_aggregator_struct(&self, gidx: CachedStructIndex) -> bool {
+        let struct_type = self.module_cache.read().struct_at(gidx);
+        struct_type.module.address().eq(&AccountAddress::ONE)
+            && struct_type.module.name().eq("aggregator_v2")
+            && struct_type.name.as_ident_str().eq("Aggregator")
+    }
+
+    // TODO: Move to another file and make constants const.
+    fn is_aggregator_snapshot_struct(&self, gidx: CachedStructIndex) -> bool {
+        let struct_type = self.module_cache.read().struct_at(gidx);
+        struct_type.module.address().eq(&AccountAddress::ONE)
+            && struct_type.module.name().eq("aggregator_v2")
+            && struct_type.name.as_ident_str().eq("AggregatorSnapshot")
+    }
+
+    // TODO: Move to another file.
+    fn aggregator_type_layout(&self, count: &mut u64) -> PartialVMResult<MoveStructLayout> {
+        let field_layouts = vec![
+            // Aggregator V2 value.
+            MoveTypeLayout::Marked(Box::new(MoveTypeLayout::U128)),
+            // Aggregator V2 limit.
+            MoveTypeLayout::U128,
+        ];
+        *count += field_layouts.len() as u64;
+        Ok(MoveStructLayout::new(field_layouts))
+    }
+
+    // TODO: Move to another file.
+    fn aggregator_snapshot_type_layout(
+        &self,
+        count: &mut u64,
+    ) -> PartialVMResult<MoveStructLayout> {
+        let field_layouts = vec![
+            // Aggregator snapshot value.
+            MoveTypeLayout::Marked(Box::new(MoveTypeLayout::U64)),
+        ];
+        *count += field_layouts.len() as u64;
+        Ok(MoveStructLayout::new(field_layouts))
+    }
+
     fn type_to_type_layout_impl(
         &self,
         ty: &Type,
         count: &mut u64,
+        marked: &mut bool,
         depth: u64,
     ) -> PartialVMResult<MoveTypeLayout> {
         if *count > MAX_TYPE_TO_LAYOUT_NODES {
@@ -2921,17 +2965,26 @@ impl Loader {
                 MoveTypeLayout::Vector(Box::new(self.type_to_type_layout_impl(
                     ty,
                     count,
+                    marked,
                     depth + 1,
                 )?))
             },
             Type::Struct(gidx) => {
                 *count += 1;
-                MoveTypeLayout::Struct(self.struct_gidx_to_type_layout(*gidx, &[], count, depth)?)
+                MoveTypeLayout::Struct(
+                    if self.is_aggregator_struct(*gidx) {
+                        self.aggregator_type_layout(count)?
+                    } else if self.is_aggregator_snapshot_struct(*gidx) {
+                        self.aggregator_snapshot_type_layout(count)?
+                    } else {
+                        self.struct_gidx_to_type_layout(*gidx, &[], count, marked, depth)?
+                    },
+                )
             },
             Type::StructInstantiation(gidx, ty_args) => {
                 *count += 1;
                 MoveTypeLayout::Struct(
-                    self.struct_gidx_to_type_layout(*gidx, ty_args, count, depth)?,
+                    self.struct_gidx_to_type_layout(*gidx, ty_args, count, marked, depth)?,
                 )
             },
             Type::Reference(_) | Type::MutableReference(_) | Type::TyParam(_) => {
@@ -3042,9 +3095,20 @@ impl Loader {
         self.type_to_type_tag_impl(ty)
     }
 
+    pub(crate) fn type_to_marked_type_layout(
+        &self,
+        ty: &Type,
+    ) -> PartialVMResult<(MoveTypeLayout, bool)> {
+        let mut count = 0;
+        let mut marked = false;
+        let layout = self.type_to_type_layout_impl(ty, &mut count, &mut marked, 1)?;
+        Ok((layout, marked))
+    }
+
     pub(crate) fn type_to_type_layout(&self, ty: &Type) -> PartialVMResult<MoveTypeLayout> {
         let mut count = 0;
-        self.type_to_type_layout_impl(ty, &mut count, 1)
+        let mut marked = false;
+        self.type_to_type_layout_impl(ty, &mut count, &mut marked, 1)
     }
 
     pub(crate) fn type_to_fully_annotated_layout(

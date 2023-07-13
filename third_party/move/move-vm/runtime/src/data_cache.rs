@@ -181,13 +181,17 @@ impl<'r> TransactionDataCache<'r> {
                 },
             };
             // TODO(Gas): Shall we charge for this?
-            let ty_layout = loader.type_to_type_layout(ty)?;
+            let (ty_layout, _marked) = loader.type_to_marked_type_layout(ty)?;
 
             let module = loader.get_module(&ty_tag.module_id());
             let metadata: &[Metadata] = match &module {
                 Some(module) => &module.module().metadata,
                 None => &[],
             };
+
+            // TODO: Next step.
+            // If marked, get_resource_with_metadata should propagate type layout
+            // for materialization, and we should use resolve differently.
 
             let (data, bytes_loaded) = self
                 .remote
