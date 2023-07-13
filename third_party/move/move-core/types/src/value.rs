@@ -116,6 +116,7 @@ pub enum MoveTypeLayout {
     U256,
 
     // Special marker which allows annotating type layout entries.
+    // TODO: We should not allow nesting.
     Marked(Box<MoveTypeLayout>),
 }
 
