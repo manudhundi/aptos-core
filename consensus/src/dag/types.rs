@@ -5,7 +5,7 @@ use crate::{
     dag::reliable_broadcast::BroadcastStatus, network::TConsensusMsg,
     network_interface::ConsensusMsg,
 };
-use anyhow::ensure;
+use anyhow::{bail, ensure};
 use aptos_consensus_types::common::{Author, Payload, Round};
 use aptos_crypto::{
     bls12381,
@@ -77,9 +77,7 @@ impl<'a> From<&'a Node> for NodeWithoutDigest<'a> {
 /// Represents the metadata about the node, without payload and parents from Node
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct NodeMetadata {
-    epoch: u64,
-    round: Round,
-    author: Author,
+    node_id: NodeId,
     timestamp: u64,
     digest: HashValue,
 }
@@ -94,9 +92,11 @@ impl NodeMetadata {
         digest: HashValue,
     ) -> Self {
         Self {
-            epoch,
-            round,
-            author,
+            node_id: NodeId {
+                epoch,
+                round,
+                author,
+            },
             timestamp,
             digest,
         }
@@ -116,6 +116,14 @@ impl NodeMetadata {
 
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+}
+
+impl Deref for NodeMetadata {
+    type Target = NodeId;
+
+    fn deref(&self) -> &Self::Target {
+        &self.node_id
     }
 }
 
@@ -160,9 +168,11 @@ impl Node {
 
         Self {
             metadata: NodeMetadata {
-                epoch,
-                round,
-                author,
+                node_id: NodeId {
+                    epoch,
+                    round,
+                    author,
+                },
                 timestamp,
                 digest,
             },
@@ -235,6 +245,10 @@ impl Node {
         let node_digest = NodeDigest::new(self.digest());
         signer.sign(&node_digest)
     }
+
+    pub fn round(&self) -> Round {
+        self.metadata.round
+    }
 }
 
 impl TDAGMessage for Node {
@@ -272,6 +286,45 @@ impl TDAGMessage for Node {
         // TODO: validate timestamp
 
         Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug, Eq, Hash, Clone)]
+pub struct NodeId {
+    epoch: u64,
+    round: Round,
+    author: Author,
+}
+
+impl NodeId {
+    pub fn new(epoch: u64, round: Round, author: Author) -> Self {
+        Self {
+            epoch,
+            round,
+            author,
+        }
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    pub fn round(&self) -> Round {
+        self.round
+    }
+
+    pub fn author(&self) -> Author {
+        self.author
+    }
+}
+
+impl From<&Node> for NodeId {
+    fn from(node: &Node) -> Self {
+        Self {
+            epoch: node.metadata.epoch,
+            round: node.metadata.round,
+            author: node.metadata.author,
+        }
     }
 }
 
@@ -523,6 +576,14 @@ impl DAGMessage {
             DAGMessage::TestAck(_) => "TestAck",
         }
     }
+
+    pub fn author(&self) -> anyhow::Result<Author> {
+        match self {
+            DAGMessage::NodeMsg(node) => Ok(node.metadata.author),
+            DAGMessage::CertifiedNodeMsg(node) => Ok(node.metadata.author),
+            _ => bail!("message does not support author field"),
+        }
+    }
 }
 
 impl TConsensusMsg for DAGMessage {
@@ -539,6 +600,14 @@ impl TConsensusMsg for DAGMessage {
             #[cfg(test)]
             DAGMessage::TestAck(_) => 1,
         }
+    }
+}
+
+impl TryFrom<DAGNetworkMessage> for DAGMessage {
+    type Error = anyhow::Error;
+
+    fn try_from(msg: DAGNetworkMessage) -> Result<Self, Self::Error> {
+        Ok(bcs::from_bytes(&msg.data)?)
     }
 }
 
