@@ -2,6 +2,7 @@
 
 use std::{env, sync::Arc};
 
+use aptos_indexer_grpc_server_framework::{RunnableConfig, ServerArgs};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use diesel::{
     r2d2::{ConnectionManager, Pool},
@@ -10,7 +11,7 @@ use diesel::{
 use google_cloud_googleapis::pubsub::v1::subscriber_client::SubscriberClient;
 use nft_metadata_crawler_parser::{establish_connection_pool, parser::Parser};
 use nft_metadata_crawler_utils::{
-    get_token_source, load_config_from_yaml,
+    get_token_source,
     pubsub::{consume_uris, send_acks},
     NFTMetadataCrawlerEntry,
 };
@@ -21,12 +22,6 @@ use tokio::{
 };
 use tonic::transport::{Channel, ClientTlsConfig};
 use tracing::{error, info};
-
-#[derive(clap::Parser)]
-pub struct ServerArgs {
-    #[clap(short, long, value_parser)]
-    pub config_path: String,
-}
 
 // Structs to hold config from YAML
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -78,6 +73,8 @@ async fn spawn_parser(
     let ts = get_token_source().await;
     loop {
         let _ = semaphore.acquire().await?;
+
+        // Pulls entry from Channel
         let (entry, ack) = {
             let lock = receiver.lock();
             let data = lock.await.recv()?;
@@ -86,8 +83,8 @@ async fn spawn_parser(
 
         let token = ts.token().await.expect("Unable to get token").access_token;
 
-        println!("Worker {} got entry", id);
-        info!("Worker {} got entry", id);
+        // Parses entry
+        info!(worker_id = id, "Received entry");
         let mut parser = Parser::new(
             entry,
             bucket.clone(),
@@ -97,7 +94,8 @@ async fn spawn_parser(
         );
         parser.parse().await?;
 
-        info!("Worker {} finished parsing", id);
+        // Sends ack to PubSub
+        info!(worker_id = id, "Finished parsing");
         send_acks(
             vec![ack],
             &mut grpc_client,
@@ -110,73 +108,80 @@ async fn spawn_parser(
     }
 }
 
-#[tokio::main]
-async fn main() {
-    info!("Starting Parser");
+#[async_trait::async_trait]
+impl RunnableConfig for ParserConfig {
+    async fn run(&self) -> anyhow::Result<()> {
+        let pool = establish_connection_pool(self.database_url.clone());
 
-    // Load configs
-    let args = <ServerArgs as clap::Parser>::parse();
-    let config =
-        load_config_from_yaml::<ParserConfig>(args.config_path).expect("Unable to load config");
-    let pool = establish_connection_pool(config.database_url.clone());
+        env::set_var(
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            self.google_application_credentials.clone(),
+        );
 
-    env::set_var(
-        "GOOGLE_APPLICATION_CREDENTIALS",
-        config.google_application_credentials,
-    );
+        // Establish gRPC client
+        let channel = Channel::from_static("https://pubsub.googleapis.com")
+            .tls_config(ClientTlsConfig::new().domain_name("pubsub.googleapis.com"))
+            .expect("Unable to create channel")
+            .connect()
+            .await
+            .expect("Unable to connect to pubsub");
 
-    // Establish gRPC client
-    let channel = Channel::from_static("https://pubsub.googleapis.com")
-        .tls_config(ClientTlsConfig::new().domain_name("pubsub.googleapis.com"))
-        .expect("Unable to create channel")
-        .connect()
-        .await
-        .expect("Unable to connect to pubsub");
+        let grpc_client = SubscriberClient::new(channel);
 
-    let grpc_client = SubscriberClient::new(channel);
+        // Create workers
+        let num_workers = 10;
+        let (sender, receiver) = bounded::<(NFTMetadataCrawlerEntry, String)>(20);
+        let receiver = Arc::new(Mutex::new(receiver));
+        let semaphore = Arc::new(Semaphore::new(num_workers));
 
-    // Create workers
-    let num_workers = 10;
-    let (sender, receiver) = bounded::<(NFTMetadataCrawlerEntry, String)>(20);
-    let receiver = Arc::new(Mutex::new(receiver));
-    let semaphore = Arc::new(Semaphore::new(num_workers));
-
-    // Spawn your producer.
-    let producer = tokio::spawn(process_response(
-        sender,
-        grpc_client.clone(),
-        config.subscription_name.clone(),
-    ));
-
-    // Spawns workers
-    let mut workers: Vec<JoinHandle<anyhow::Result<()>>> = Vec::new();
-    for id in 0..num_workers {
-        let semaphore_clone = Arc::clone(&semaphore);
-        let receiver_clone = Arc::clone(&receiver);
-
-        let worker = tokio::spawn(spawn_parser(
-            id,
-            semaphore_clone,
-            receiver_clone,
-            pool.clone(),
-            config.bucket.clone(),
+        // Spawn your producer.
+        let producer = tokio::spawn(process_response(
+            sender,
             grpc_client.clone(),
-            config.subscription_name.clone(),
-            config.cdn_prefix.clone(),
+            self.subscription_name.clone(),
         ));
 
-        workers.push(worker);
-    }
+        // Spawns workers
+        let mut workers: Vec<JoinHandle<anyhow::Result<()>>> = Vec::new();
+        for id in 0..num_workers {
+            let semaphore_clone = Arc::clone(&semaphore);
+            let receiver_clone = Arc::clone(&receiver);
 
-    match producer.await {
-        Ok(_) => (),
-        Err(e) => error!("Producer error: {:?}", e),
-    }
+            let worker = tokio::spawn(spawn_parser(
+                id,
+                semaphore_clone,
+                receiver_clone,
+                pool.clone(),
+                self.bucket.clone(),
+                grpc_client.clone(),
+                self.subscription_name.clone(),
+                self.cdn_prefix.clone(),
+            ));
 
-    for worker in workers {
-        match worker.await {
-            Ok(_) => (),
-            Err(e) => error!("Worker error: {:?}", e),
+            workers.push(worker);
         }
+
+        match producer.await {
+            Ok(_) => (),
+            Err(e) => error!("Producer error: {:?}", e),
+        }
+
+        for worker in workers {
+            match worker.await {
+                Ok(_) => (),
+                Err(e) => error!("Worker error: {:?}", e),
+            }
+        }
+        Ok(())
     }
+
+    fn get_server_name(&self) -> String {
+        "parser".to_string()
+    }
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let args = <ServerArgs as clap::Parser>::parse();
+    args.run::<ParserConfig>().await
 }

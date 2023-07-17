@@ -9,10 +9,7 @@ use diesel::{
     PgConnection,
 };
 use image::{ImageBuffer, ImageFormat};
-use nft_metadata_crawler_utils::{
-    gcs::{write_image_to_gcs, write_json_to_gcs},
-    NFTMetadataCrawlerEntry,
-};
+use nft_metadata_crawler_utils::{gcs::write_json_to_gcs, NFTMetadataCrawlerEntry};
 use serde_json::Value;
 use tracing::{error, info};
 
@@ -117,107 +114,6 @@ impl Parser {
         };
     }
 
-    async fn handle_image_optimizer(
-        &mut self,
-        img_uri: String,
-        animation_uri_option: Option<String>,
-    ) {
-        // Optimize image
-        match self.optimize_image(img_uri).await {
-            Ok((new_img, format, raw_image_uri)) => {
-                info!(
-                    last_transaction_version = self.entry.last_transaction_version,
-                    "Successfully optimized image"
-                );
-
-                self.model.raw_image_uri = Some(raw_image_uri);
-
-                // Write image to GCS
-                match write_image_to_gcs(
-                    self.token.clone(),
-                    format,
-                    self.bucket.clone(),
-                    self.entry.token_data_id.clone(),
-                    new_img,
-                )
-                .await
-                {
-                    // Save CDN link to model if successful
-                    Ok(filename) => {
-                        self.model.cdn_image_uri =
-                            Some(format!("{}/{}", self.cdn_prefix, filename));
-                        info!(
-                            last_transaction_version = self.entry.last_transaction_version,
-                            "Successfully saved image"
-                        );
-                    },
-                    Err(e) => error!(
-                        last_transaction_version = self.entry.last_transaction_version,
-                        "{}",
-                        e.to_string()
-                    ),
-                }
-            },
-            Err(e) => {
-                // Increment retry count for image
-                self.model.image_optimizer_retry_count += 1;
-                error!(
-                    last_transaction_version = self.entry.last_transaction_version,
-                    "{}",
-                    e.to_string()
-                )
-            },
-        };
-
-        // Optimize animation if exists
-        if let Some(animation_uri) = animation_uri_option {
-            match self.optimize_image(animation_uri).await {
-                Ok((new_img, format, raw_animation_uri)) => {
-                    info!(
-                        last_transaction_version = self.entry.last_transaction_version,
-                        "Successfully optimized image"
-                    );
-
-                    self.model.raw_animation_uri = Some(raw_animation_uri);
-
-                    // Write animation to GCS
-                    match write_image_to_gcs(
-                        self.token.clone(),
-                        format,
-                        self.bucket.clone(),
-                        self.entry.token_data_id.clone(),
-                        new_img,
-                    )
-                    .await
-                    {
-                        // Save CDN link to model if successful
-                        Ok(filename) => {
-                            self.model.cdn_animation_uri =
-                                Some(format!("{}/{}", self.cdn_prefix, filename));
-                            info!(
-                                last_transaction_version = self.entry.last_transaction_version,
-                                "Successfully saved image"
-                            );
-                        },
-                        Err(e) => error!(
-                            last_transaction_version = self.entry.last_transaction_version,
-                            "{}",
-                            e.to_string()
-                        ),
-                    }
-                },
-                Err(e) => {
-                    // Do not increment retry count for animation
-                    error!(
-                        last_transaction_version = self.entry.last_transaction_version,
-                        "{}",
-                        e.to_string()
-                    )
-                },
-            };
-        }
-    }
-
     // Calls and handles error for URI parser
     fn handle_uri_parser_jsons(&mut self) -> String {
         match Self::parse_uri(self.entry.token_uri.clone()) {
@@ -266,6 +162,15 @@ impl Parser {
         };
     }
 
+    // Calls and handles errors for image optimizer
+    async fn handle_image_optimizer(
+        &mut self,
+        _img_uri: String,
+        _animation_uri_option: Option<String>,
+    ) {
+        todo!();
+    }
+
     // Parse URI for IPFS CID and path
     fn parse_uri(_uri: String) -> anyhow::Result<String> {
         todo!();
@@ -282,7 +187,7 @@ impl Parser {
     }
 
     // Optimize and resize image
-    async fn optimize_image(
+    async fn _optimize_image(
         &mut self,
         _img_uri: String,
     ) -> anyhow::Result<(Vec<u8>, ImageFormat, String)> {
