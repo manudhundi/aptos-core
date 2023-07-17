@@ -124,7 +124,7 @@ impl Parser {
 
     // Calls and handles error for URI parser for image and animation URIs
     fn handle_uri_parser_images(&mut self) -> (String, Option<String>) {
-        // Use token_uri if  not provided or the JSON parsing failed
+        // Use token_uri if not provided or the JSON parsing failed
         let raw_img_uri = self
             .model
             .raw_image_uri

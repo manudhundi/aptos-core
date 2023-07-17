@@ -1,7 +1,5 @@
 // Copyright © Aptos Foundation
 
-use std::{env, sync::Arc};
-
 use aptos_indexer_grpc_server_framework::{RunnableConfig, ServerArgs};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use diesel::{
@@ -16,6 +14,7 @@ use nft_metadata_crawler_utils::{
     NFTMetadataCrawlerEntry,
 };
 use serde::{Deserialize, Serialize};
+use std::{env, sync::Arc};
 use tokio::{
     sync::{Mutex, Semaphore},
     task::JoinHandle,
