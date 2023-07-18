@@ -33,7 +33,9 @@ pub struct ParserConfig {
     pub cdn_prefix: String,
 }
 
-// Subscribes to PubSub and sends URIs to Channel
+/**
+ * Subscribes to PubSub and sends URIs to Channel
+ */
 async fn process_response(
     sender: Sender<(NFTMetadataCrawlerEntry, String)>,
     mut grpc_client: SubscriberClient<Channel>,
@@ -58,7 +60,9 @@ async fn process_response(
     }
 }
 
-// Spawns a worker to pull from Channel and perform parsing operations
+/**
+ * Spawns a worker to pull from Channel and perform parsing operations
+ */
 async fn spawn_parser(
     id: usize,
     semaphore: Arc<Semaphore>,
