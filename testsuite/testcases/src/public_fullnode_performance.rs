@@ -19,6 +19,7 @@ use rand::{
     seq::SliceRandom,
     Rng, SeedableRng,
 };
+use std::iter::once;
 use tokio::runtime::Runtime;
 
 /// A simple test that adds multiple public fullnodes (PFNs) to the swarm
@@ -92,7 +93,7 @@ impl PFNPerformance {
         let fullnode_peer_ids = swarm.full_nodes().map(|v| v.peer_id()).collect::<Vec<_>>();
         let (vfn_peer_ids, pfn_peer_ids) =
             fullnode_peer_ids.split_at(fullnode_peer_ids.len() - self.num_pfns as usize);
-        let mut all_peer_ids: Vec<_> = validator_peer_ids
+        let mut vfn_and_vn_ids: Vec<_> = validator_peer_ids
             .iter()
             .zip_longest(vfn_peer_ids)
             .map(|either_or_both| match either_or_both {
@@ -100,11 +101,11 @@ impl PFNPerformance {
                 EitherOrBoth::Left(validator) => vec![*validator],
                 EitherOrBoth::Right(_) => panic!("Unexpected"),
             })
-            .chain(pfn_peer_ids.iter().map(|id| vec![*id]))
             .collect();
-        all_peer_ids.shuffle(&mut StdRng::from_seed(self.shuffle_rng_seed));
+        vfn_and_vn_ids.shuffle(&mut StdRng::from_seed(self.shuffle_rng_seed));
 
-        all_peer_ids
+        // All PFNs in the first region
+        once(pfn_peer_ids.to_vec()).chain(vfn_and_vn_ids).collect()
     }
 }
 
