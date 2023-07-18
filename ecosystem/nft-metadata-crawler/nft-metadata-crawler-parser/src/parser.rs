@@ -18,12 +18,13 @@ use tracing::info;
 // Stuct that represents a parser for a single entry from queue
 #[allow(dead_code)]
 pub struct Parser {
-    pub entry: NFTMetadataCrawlerEntry,
+    entry: NFTMetadataCrawlerEntry,
     model: NFTMetadataCrawlerURIs,
     bucket: String,
     token: String,
     conn: PooledConnection<ConnectionManager<PgConnection>>,
     cdn_prefix: String,
+    uri_parser: URIParser,
 }
 
 impl Parser {
@@ -33,6 +34,7 @@ impl Parser {
         token: String,
         conn: PooledConnection<ConnectionManager<PgConnection>>,
         cdn_prefix: String,
+        ipfs_prefix: String,
     ) -> Self {
         Self {
             model: NFTMetadataCrawlerURIs::new(entry.token_uri.clone()),
@@ -41,6 +43,7 @@ impl Parser {
             token,
             conn,
             cdn_prefix,
+            uri_parser: URIParser::new(ipfs_prefix),
         }
     }
 
@@ -64,7 +67,7 @@ impl Parser {
 
         // Parse token_uri
         self.model.set_token_uri(self.entry.token_uri.clone());
-        let json_uri = URIParser::parse(Some(self.model.get_token_uri()));
+        let json_uri = self.uri_parser.parse(self.model.get_token_uri().as_str());
 
         // Parse JSON for raw_image_uri and raw_animation_uri
         let (raw_image_uri, raw_animation_uri, json) = JSONParser::parse(json_uri).await;
@@ -77,9 +80,14 @@ impl Parser {
 
         self.commit_to_postgres().await;
 
-        // Parse raw_image_uri and raw_animation_uri
-        let img_uri = URIParser::parse(self.model.get_raw_image_uri());
-        let animation_uri = URIParser::parse(self.model.get_raw_animation_uri());
+        // Parse raw_image_uri and raw_animation_uri, resort to default if parsing fails
+        let img_uri = self.uri_parser.parse_with_default(
+            self.model.get_raw_image_uri().as_deref(),
+            Some(self.model.get_token_uri().as_str()),
+        );
+        let animation_uri = self
+            .uri_parser
+            .parse_with_default(self.model.get_raw_animation_uri().as_deref(), None);
 
         // Resize and optimize image and animation
         let image = ImageOptimizer::optimize(img_uri).await;

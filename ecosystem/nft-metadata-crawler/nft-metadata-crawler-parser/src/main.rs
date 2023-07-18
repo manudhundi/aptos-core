@@ -31,6 +31,7 @@ pub struct ParserConfig {
     pub subscription_name: String,
     pub database_url: String,
     pub cdn_prefix: String,
+    pub ipfs_prefix: String,
 }
 
 /**
@@ -72,6 +73,7 @@ async fn spawn_parser(
     mut grpc_client: SubscriberClient<Channel>,
     subscription_name: String,
     cdn_prefix: String,
+    ipfs_prefix: String,
 ) -> anyhow::Result<()> {
     let ts = get_token_source().await;
     loop {
@@ -94,6 +96,7 @@ async fn spawn_parser(
             token.clone(),
             conn.get()?,
             cdn_prefix.clone(),
+            ipfs_prefix.clone(),
         );
         parser.parse().await?;
 
@@ -159,6 +162,7 @@ impl RunnableConfig for ParserConfig {
                 grpc_client.clone(),
                 self.subscription_name.clone(),
                 self.cdn_prefix.clone(),
+                self.ipfs_prefix.clone(),
             ));
 
             workers.push(worker);
