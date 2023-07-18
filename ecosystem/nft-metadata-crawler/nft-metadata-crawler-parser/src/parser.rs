@@ -96,12 +96,16 @@ impl Parser {
         Ok(())
     }
 
-    // Calls and handles error for writing JSON to GCS
+    /**
+     * Calls and handles error for writing JSON to GCS
+     */
     async fn handle_write_json_to_gcs(&mut self, _json: Option<Value>) -> Option<String> {
         todo!();
     }
 
-    // Calls and handles error for writing image to GCS
+    /**
+     * Calls and handles error for writing image to GCS
+     */
     async fn handle_write_image_to_gcs(
         &mut self,
         _image: Option<(Vec<u8>, ImageFormat)>,
@@ -109,7 +113,9 @@ impl Parser {
         todo!();
     }
 
-    // Calls and handles error for upserting to Postgres
+    /**
+     * Calls and handles error for upserting to Postgres
+     */
     async fn commit_to_postgres(&mut self) {
         todo!();
     }
